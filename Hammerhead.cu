@@ -1675,7 +1675,7 @@ void InitSearch(Search *info)
     info->bestScore = 0;
 }
 
-// NegaMaxSearch that runs entirely on the CPU, for comparison purposes
+// NegaMaxSearch that runs entirely on the CPU, for comparison purposes, explained in doc
 static int RegNegaMaxSearch(Chessboard *board, Search *info, int depth)
 {
     int bestMove = 0;
@@ -1692,7 +1692,7 @@ static int RegNegaMaxSearch(Chessboard *board, Search *info, int depth)
     Movelist list[1];
     GenerateMoves(board, info, list);
 
-    // the good loop
+    // loops through all possible moves, recurssively calls function
     for (int moveNum = 0; moveNum < list->moveCount; ++moveNum)
     {
         Chessboard boardStored[1];
@@ -1731,7 +1731,7 @@ static int RegNegaMaxSearch(Chessboard *board, Search *info, int depth)
     return alpha;
 }
 
-// NegaMaxSearch that runs entirely on the CPU, for comparison purposes
+// NegaMaxSearch used when CPU depth is above 2, function is not in use anywhere as CPUdepth > 2 is not allowed
 static int EvalNegaMaxSearch(Chessboard *board, Search *info, Search *searchP, int depth, int &count)
 {
     int bestMove = 0;
@@ -1790,7 +1790,7 @@ static int EvalNegaMaxSearch(Chessboard *board, Search *info, Search *searchP, i
     return alpha;
 }
 
-// NegaMaxSearch with the adding of the board positions and info to the vectors which is called from CreateNega...
+// Same as CreateNegaMaxSearch except dcount is no longer here and since we aren't at the top depth validMoves are not being added
 static void ContinueNegaMaxSearch(Chessboard *board, Search *info, int depth, int &count)
 {
 
@@ -1855,7 +1855,7 @@ static void CreateNegaMaxSearch(Chessboard *board, Search *info, Move *valid, in
 
     GenerateMoves(board, info, list);
 
-    // the good loop
+    // Loops through all possible moves at this level and recursively calls itself with 1 less depth
     for (int moveNum = 0; moveNum < list->moveCount; ++moveNum)
     {
         Chessboard boardStored[1];
@@ -1864,9 +1864,12 @@ static void CreateNegaMaxSearch(Chessboard *board, Search *info, Move *valid, in
         if (!MakeMove(board, list->moves[moveNum].move, allPos))
             continue;
 
+        // Adds valid moves to array for analysis after GPU search
         valid[dcount].move = list->moves[moveNum].move;
 
         ContinueNegaMaxSearch(board, info, depth - 1, count);
+
+        // Counter used for searching when CPUdepth = 2 to do a MiniMax search
         moveCounterPtr[dcount] = count;
         //moveCounter->push_back(count[0]);
         dcount++;
@@ -1875,7 +1878,7 @@ static void CreateNegaMaxSearch(Chessboard *board, Search *info, Move *valid, in
     }
 }
 
-// NegaMaxSearch that the GPU should call
+// NegaMaxSearch that the GPU should call, Same as RegNegaMax
 __device__ static int SplitNegaMaxSearch(Chessboard *board, Search *info, int depth)
 {
 
@@ -1939,6 +1942,7 @@ __device__ static int SplitNegaMaxSearch(Chessboard *board, Search *info, int de
     return alpha;
 }
 
+// Kernel function called that starts searching assuming the thread number is in our needed array of searches
 __global__ static void kernelSearch(Chessboard *dev_board, Search *dev_searches, int *dev_totalThreadCount, int *gpu_depth)
 {
 
@@ -1946,22 +1950,25 @@ __global__ static void kernelSearch(Chessboard *dev_board, Search *dev_searches,
     int depth = gpu_depth[0];
     //printf("ker: %i\n", location);
 
+    // checks if this thread needs to calculate
     if (location < dev_totalThreadCount[0])
     {
 
-        SplitNegaMaxSearch(&dev_board[location], &dev_searches[location], depth); //magic number needs to be changed
+        SplitNegaMaxSearch(&dev_board[location], &dev_searches[location], depth); 
         //printf("done");
     }
 }
 
+//The Search algorithm that calls and manages everything
 static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int gpu_depth)
 {
 
+    // Used for when cpuDepth is 2
     int moveCounter[146];
-    boards.reserve(pow(100, 3));   // horrible problem here too much space
-    searches.reserve(pow(100, 3)); // horrible problem here
+    boards.reserve(pow(100, 3));
+    searches.reserve(pow(100, 3)); 
 
-    // initalize the vectors with all of hte positions we need
+    // initalize the variables to 0
     int totalThreadCount = 0;
     int dcount = 0;
     Movelist saveList[1];
@@ -1973,10 +1980,10 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
 
     int *moveCounterPtr = moveCounter;
 
+    // Creates and saves the boards we need to run on the GPU
     CreateNegaMaxSearch(board, info, validMovePtr, moveCounterPtr, cpu_depth, totalThreadCount, dcount);
 
-    // copy Board and search vector to device
-
+    // Calculate the block count and total threads per block
     double result = (double)totalThreadCount / (double)256;
     int blockCount = (int)(ceil(result));
     //printf("blockCount: %i", blockCount);
@@ -1986,7 +1993,7 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
 
     //printf("TTC: %i\n", totalThreadCount);
 
-    //Arrays that get moved to the device
+    // Copy arrys over to the device
     Chessboard *boardP;
     Search *searchP;
 
@@ -2004,6 +2011,7 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
     cudaMalloc((void **)&dev_totalThreadCount, sizeof(int));
     cudaMalloc((void **)&dev_gpuDepth, sizeof(int));
 
+    // copy vectors to arrays
     for (int i = 0; i < totalThreadCount; i++)
     {
         boardP[i] = boards[i];
@@ -2016,13 +2024,14 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
     cudaMemcpy(dev_totalThreadCount, &totalThreadCount, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(dev_gpuDepth, &gpu_depth, sizeof(int), cudaMemcpyHostToDevice);
 
-    size_t limit = 10000; //magic number that needs to change based on gpu depth and total thread count
-
+    // CUDA cannot calculate recursive stack size, so we have to set stack size manually
+    size_t limit = 2616*(gpu_depth+1); //space taken up by going one deeper, plus the first depth
     cudaDeviceSetLimit(cudaLimitStackSize, limit);
 
     // for testing
     //threadsPerBlock = 256;
 
+    // create variables and then run our search
     dim3 grid(blockCount, 1, 1);
 
     kernelSearch<<<grid, threadsPerBlock>>>(dev_boards, dev_searches, dev_totalThreadCount, dev_gpuDepth);
@@ -2041,6 +2050,7 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
 
     if (cpu_depth == 1)
     {
+        // Simple Search
         int reverse = -1;
 
         for (int i = 0; i < totalThreadCount; i++)
@@ -2063,6 +2073,7 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
     }
     else if (cpu_depth == 2)
     {
+        // MiniMax adjacent search to determine our best move
         int lastIndex = 0;
         int maxVal = -90000;
         int minVal = 90000;
@@ -2088,7 +2099,8 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
     }
     else
     {
-        // This is logically sound but will not launch as the number of threads will be too high
+        // This is logically sound as the evalutation function just becomes the array index of that position
+        // but will not launch as the number of threads will be too high
         int count = 0;
         retScore = EvalNegaMaxSearch(board, info, searchP, cpu_depth, count);
     }
@@ -2101,6 +2113,7 @@ static int GPUNegaMaxSearch(Chessboard *board, Search *info, int cpu_depth, int 
     return retScore;
 }
 
+// Function that runs our search and times our functions
 static inline void SearchPosition(Chessboard *board, Search *info, int cpuDepth, int gpuDepth)
 {
 
@@ -2137,10 +2150,8 @@ static inline void SearchPosition(Chessboard *board, Search *info, int cpuDepth,
     //printf("Move ordering: %.2f\n",(info->fhf/info->fh));
 }
 
-/********************************************
-  ************* Parse FEN/Move ***************
-  ********************************************/
 
+// Function that converts a FEN into a board
 void ParseFen(Chessboard *board, char *fen)
 {
     ResetBoard(board);
@@ -2261,6 +2272,7 @@ if (*fen != '-')
 }
 }
 
+// Parses a move
 int ParseMove(Chessboard *board, Search *info, char *moveStr)
 {
     Movelist list[1];
@@ -2304,6 +2316,7 @@ int ParseMove(Chessboard *board, Search *info, char *moveStr)
     return 0;
 }
 
+// Performance testing code when "test" is called, Search Position but loops through file for input
 static inline void TestSearchPosition(Chessboard *board, Search *info, int cpuDepth, int gpuDepth)
 {
 
@@ -2349,13 +2362,10 @@ static inline void TestSearchPosition(Chessboard *board, Search *info, int cpuDe
     }
 }
 
-/********************************************
-  **************** Hammerhead *****************
-  ********************************************/
-
+// Hammerhead main
 int main(int argc, char *argv[])
 {
-
+    // Init everything
     Chessboard board[1];
     Search info[1];
     InitSearch(info);
@@ -2365,6 +2375,7 @@ int main(int argc, char *argv[])
     int cpuDepth = 2;
     int gpuDepth = 3;
 
+    // If user specifies depth, set depths
     if (argc == 3)
     {
         cpuDepth = atoi(argv[1]);
@@ -2376,6 +2387,7 @@ int main(int argc, char *argv[])
         cpuDepth = 2;
     }
 
+    // Loop through accepting and analyzing FENs
     while (1)
     {
 
@@ -2401,9 +2413,6 @@ int main(int argc, char *argv[])
 
         SearchPosition(board, info, cpuDepth, gpuDepth);
 
-        // parse fen on input
-
-        // search position
     }
 
     return 0;
